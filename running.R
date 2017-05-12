@@ -4,7 +4,7 @@ library(ggplot2)
 library(GGally)
 library(gridExtra)
 
-df <- read_csv('TrackerDatenViaViewKoni.csv')
+df <- read_csv('tracker.csv')
 df
 
 #df <- df %>% select(Stnr, Timestamp, Duration, Longitude, Latitude, LastLongitude, LastLatitude, Distance2D, Speed2D) 
