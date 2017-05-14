@@ -4,41 +4,101 @@ library(ggplot2)
 library(GGally)
 library(gridExtra)
 library(dlm)
-
-form <- function(theta){
-  dlmModPoly(order = 1, dV = exp(theta[1]), dW = exp(theta[2]))
-}
-
+library(lubridate)
 
 df <- read_csv('tracker.csv')
 df
 
-var <- ts(df$Latitude)
-var <- ts(df$Longitude)
-var <- Nile
-model <- form(dlmMLE(var, parm = c(1, 1), form)$par)
-model
-filtered <- dlmFilter(var, model)
+df <- df %>% filter(Timestamp > ymd_hms('2016-08-06 10:00:00'))
+df
 
-#model <- form(dlmMLE(Nile, parm = c(1, 1), form)$par)
-#filtered <- dlmFilter(Nile, model)
-#ggfortify:::autoplot.dlmFiltered(filtered, ts.linetype = 'dashed', fitted.colour = 'blue')
-autoplot(filtered, ts.linetype = 'dashed', fitted.colour = 'cyan')
-
-smoothed <- dlmSmooth(filtered)
-class(smoothed)
-autoplot(smoothed)
-
-p <- autoplot(filtered, fitted.colour = 'cyan')
-autoplot(smoothed, ts.colour = 'blue', p = p)
-
-
-
-#df <- df %>% select(Stnr, Timestamp, Duration, Longitude, Latitude, LastLongitude, LastLatitude, Distance2D, Speed2D) 
-df <- df %>% select(Stnr, Timestamp, Duration, Longitude, Latitude, Distance2D, Distance2DTot, Speed2D, Altitude, LastAltitude) %>%
+df <- df %>% select(Stnr, Timestamp, Duration, Longitude, Latitude, LastLongitude, LastLatitude, Distance2D, Distance2DTot, Speed2D, Altitude, LastAltitude) %>%
   mutate(AltDiff = Altitude - LastAltitude, AltDiff2 = AltDiff^2, AltDiff3 = AltDiff^3, AltDiffExp = exp(AltDiff))
-#df <- df[70:80, ]
 df <- df %>% mutate(Stnr = factor(Stnr))
+
+#df69$madist <- ma(df69$Distance2D, 6, centre = TRUE)
+
+df69 <- df %>% filter(Stnr == 69)
+df395 <- df %>% filter(Stnr == 395)
+df428 <- df %>% filter(Stnr == 428)
+df529 <- df %>% filter(Stnr == 529)
+
+dfs <- list(df69, df395, df428, df529)
+dfs
+
+###########################################################################################
+#                               Kalman Filtering for lat/long                             #
+###########################################################################################
+
+#var <- ts(df$Latitude)
+var <- ts(df529$Longitude)
+
+####### local level (random walk plus noise)  - StructTS ######
+
+#struct <- StructTS(var, type="level")
+struct <- StructTS(var, type="trend")
+if (struct$code != 0) stop("optimizer did not converge")
+
+print(struct$coef)
+
+cat("Transitional variance:", struct$coef["level"], "\n",
+    "Slope variance:", struct$coef["slope"], "\n",
+    "Observational variance:", struct$coef["epsilon"], "\n",
+    "Initial level of mu:", struct$model0$a[1], "\n",
+    "Initial level of lambda:", struct$model0$a[2], "\n",
+    "Initial level:", struct$model0$a, "\n")
+tsdiag(struct)
+
+###### local level (random walk plus noise)  - DLM ######
+buildModPoly1 <- function(v) {
+  dV <- exp(v[1])
+  dW <- exp(v[2])
+  m0 <- v[3]
+  dlmModPoly(1, dV=dV, dW=dW, m0=m0)
+}
+
+buildModPoly2 <- function(v) {
+  dV <- exp(v[1])
+  dW <- exp(v[2:3])
+  m0 <- v[4:5]
+  dlmModPoly(order=2, dV=dV, dW=dW, m0=m0)
+}
+
+varGuess <- var(diff(var), na.rm=TRUE)
+mu0Guess <- as.numeric(var[1])
+lambda0Guess <- 0.0
+
+parm <- c(log(varGuess), log(varGuess), log(varGuess),
+          mu0Guess, lambda0Guess)
+#mle <- dlmMLE(var, parm=parm, buildModPoly1)
+mle <- dlmMLE(var, parm=parm, buildModPoly2)
+
+if (mle$convergence != 0) stop(mle$message)
+
+#model <- buildModPoly1(mle$par)
+model <- buildModPoly2(mle$par)
+cat("Observational variance:", model$V, "\n",
+    "Transitional variance:", model$W, "\n",
+    "Initial level:", model$m0, "\n")
+
+filtered <- dlmFilter(var, model)
+tsdiag(filtered)
+smoothed <- dlmSmooth(filtered)
+
+p <- autoplot(filtered, ts.linetype = 'dashed', fitted.colour = 'blue', ts.colour = 'green')
+p
+autoplot(smoothed, ts.linetype = 'dotted', ts.colour = 'red', p = p)
+plot(cbind(var, filtered$m[-1], smoothed$s[-1]), plot.type='s', col=c("black","red","blue"), ylab="Level", main="", lwd=c(1,2,2))
+
+
+###########################################################################################
+#                               Explore                                                   #
+###########################################################################################
+
+ggplot(df, aes(x = Timestamp, y = Altitude, color = Speed2D)) + geom_point() + facet_wrap(~ Stnr) + 
+  scale_colour_gradient(low = "orange", high = "blue")
+ggplot(df, aes(x = Distance2DTot, y = Altitude, color = Speed2D)) + geom_point() + facet_wrap(~ Stnr) +
+  scale_colour_gradient(low = "orange", high = "blue")
 
 #distances <- c()
 #for(i in 1:nrow(df)) {
@@ -47,37 +107,48 @@ df <- df %>% mutate(Stnr = factor(Stnr))
 #df <- df %>% mutate(d2 = distances)
 #df
 
-ggplot(df, aes(x = Timestamp, y = Altitude, color = Speed2D)) + geom_point() + facet_wrap(~ Stnr) + 
-  scale_colour_gradient(low = "orange", high = "blue")
-ggplot(df, aes(x = Distance2DTot, y = Altitude, color = Speed2D)) + geom_point() + facet_wrap(~ Stnr) +
-  scale_colour_gradient(low = "orange", high = "blue")
+
+###########################################################################################
+#                               Cleanup                                                   #
+###########################################################################################
+
+df69strange <- df69 %>% filter(between(Timestamp, ymd_hms('2016-08-06 12:50:00'), ymd_hms('2016-08-06 13:00:00')))
+df69strange
+#----> ist vielleicht gar nicht komisch? da komplette rows fehlen?
+#----> was bleibt dann an komischem bez. speed und altdiff?????????????????
 
 hist(df$Duration[df$Duration>60])
 hist(df$Duration[df$Duration<60])
-#df <- df %>% filter(Duration < 30)
 
 hist(df$Distance2D)
 hist(df$AltDiff)
 
-df69 <- df %>% filter(Stnr == 69)
-df395 <- df %>% filter(Stnr == 395)
-df428 <- df %>% filter(Stnr == 428)
-df529 <- df %>% filter(Stnr == 529)
 
-#df69$madist <- ma(df69$Distance2D, 6, centre = TRUE)
+
+
 
 ###########################################################################################
+#                  Speed2D ~ AltDiff + AltDiff2 + Altdiff3 + AltDiffExp                   #
+###########################################################################################
 
-dfs <- list(df69, df395, df428, df529)
-dfs
 
-# Speed2D ~ Distance2DTot + AltDiff
+plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiff, y = Speed2D)) + geom_point(color = 'green'), dfs)
+do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff, 'ncol' = 2, top = "Speed2D by AltDiff"))
 
-fits <- Map(function (df) lm(Speed2D ~ Distance2DTot + AltDiff, data = df), dfs)
+plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiff2, y = Speed2D)) + geom_point(color = 'blue'), dfs)
+do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff2, 'ncol' = 2, top = "Speed2D by AltDiff2"))
+
+plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiff3, y = Speed2D)) + geom_point(color = 'red'), dfs)
+do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff3, 'ncol' = 2, top = "Speed2D by AltDiff3"))
+
+plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiffExp, y = Speed2D)) + geom_point(color = 'cyan'), dfs)
+do.call('grid.arrange', list('grobs' = plots_speed_by_altdiffexp, 'ncol' = 2, top = "Speed2D by AltDiffExp"))
+
+fits <- Map(function (df) lm(Speed2D ~ AltDiff + AltDiff2 + Altdiff3 + AltDiffExp, data = df), dfs)
 summaries <- Map(summary, fits)
 summaries
 
-for (df in dfs) print(ggpairs(df[c("AltDiff", "Distance2DTot", "Speed2D")]))
+for (df in dfs) print(ggpairs(df[c("AltDiff", "AltDiff2", "Altdiff3", "AltDiffExp", "Speed2D")]))
 
 plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiff, y = Speed2D, color = Distance2DTot)) + geom_point() +
                                 scale_colour_gradient(low = "orange", high = "blue"), dfs)
@@ -98,25 +169,6 @@ prediction_plots <- Map(function(prediction_df) ggplot(prediction_df, aes(x = Di
 do.call('grid.arrange', list('grobs' = prediction_plots, 'ncol' = 2, top = "Speed2D by AltDiff and Distance2D: Prediction Intervals"))
 #do.call('grid.arrange', list('grobs' = prediction_plots, 'ncol' = 2, top = "Speed2D by AltDiff and Distance2D: Confidence Intervals"))
 
-
-#####################################################################################
-
-#
-plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiff, y = Speed2D)) + geom_point(color = 'green'), dfs)
-do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff, 'ncol' = 2, top = "Speed2D by AltDiff"))
-
-plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiff2, y = Speed2D)) + geom_point(color = 'blue'), dfs)
-do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff2, 'ncol' = 2, top = "Speed2D by AltDiff2"))
-
-plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiff3, y = Speed2D)) + geom_point(color = 'red'), dfs)
-do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff3, 'ncol' = 2, top = "Speed2D by AltDiff3"))
-
-plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiffExp, y = Speed2D)) + geom_point(color = 'cyan'), dfs)
-do.call('grid.arrange', list('grobs' = plots_speed_by_altdiffexp, 'ncol' = 2, top = "Speed2D by AltDiffExp"))
-
-
-
-df529 %>% filter(AltDiff > 30)
 
 
 
@@ -151,11 +203,14 @@ ggplot(route, aes(Latitude, Longitude)) + geom_line() +
   geom_line(mapping = aes(Latitude, Longitude), data = df529, color = 'violet') +
   coord_cartesian(xlim = c(46.320, 46.330), ylim = c(7.200, 7.225))
 
+# zoom in further
 ggplot(route, aes(Latitude, Longitude)) + geom_line() + 
   geom_line(mapping = aes(Latitude, Longitude), data = df69, color = 'blue') +
   geom_line(mapping = aes(Latitude, Longitude), data = df395, color = 'green') +
   geom_line(mapping = aes(Latitude, Longitude), data = df428, color = 'yellow') +
   geom_line(mapping = aes(Latitude, Longitude), data = df529, color = 'violet') +
-  coord_cartesian(xlim = c(46.350, 46.355), ylim = c(7.225, 7.250))
+  coord_cartesian(xlim = c(46.3250, 46.3255), ylim = c(7.200, 7.225))
+
+
 
 
