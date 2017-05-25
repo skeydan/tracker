@@ -14,7 +14,10 @@ df <- df %>% filter(Timestamp > ymd_hms('2016-08-06 10:00:00'))
 df
 
 df <- df %>% select(Stnr, Timestamp, Duration, Longitude,  LastLongitude, Latitude, LastLatitude,  Altitude, LastAltitude, Distance2D, Distance2DTot, Speed2D) %>%
-  mutate(AltDiff = Altitude - LastAltitude, AltDiff2 = AltDiff^2, AltDiff3 = AltDiff^3, AltDiffExp = exp(AltDiff))
+  mutate(AltDiff = Altitude - LastAltitude)
+df <- df %>% mutate(AltDiffRatio = AltDiff/Distance2D)
+df <- df %>% mutate(ADR2 = AltDiffRatio^2, ADR3 = AltDiffRatio^3)
+
 df <- df %>% mutate(Stnr = factor(Stnr))
 
 #df69$madist <- ma(df69$Distance2D, 6, centre = TRUE)
@@ -136,49 +139,60 @@ plot(cbind(var, filtered$m[-1], smoothed$s[-1]), plot.type='s', col=c("black","r
 
 
 ###########################################################################################
-#                  Speed2D ~ AltDiff + AltDiff2 + Altdiff3 + AltDiffExp                   #
+#                  Speed2D ~ AltDiffRatio + ADR2 + ADR3                                   #
 ###########################################################################################
 
 
-plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiff, y = Speed2D)) + geom_point(color = 'green'), dfs)
+plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiffRatio, y = Speed2D)) + geom_point(color = 'green'), dfs)
 do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff, 'ncol' = 2, top = "Speed2D by AltDiff"))
 
-plots_speed_by_altdiff2 <- Map(function (df) ggplot(df, aes(x = AltDiff2, y = Speed2D)) + geom_point(color = 'blue'), dfs)
+plots_speed_by_altdiff2 <- Map(function (df) ggplot(df, aes(x = ADR2, y = Speed2D)) + geom_point(color = 'blue'), dfs)
 do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff2, 'ncol' = 2, top = "Speed2D by AltDiff2"))
 
-plots_speed_by_altdiff3 <- Map(function (df) ggplot(df, aes(x = AltDiff3, y = Speed2D)) + geom_point(color = 'red'), dfs)
+plots_speed_by_altdiff3 <- Map(function (df) ggplot(df, aes(x = ADR3, y = Speed2D)) + geom_point(color = 'red'), dfs)
 do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff3, 'ncol' = 2, top = "Speed2D by AltDiff3"))
 
-plots_speed_by_altdiffexp <- Map(function (df) ggplot(df, aes(x = AltDiffExp, y = Speed2D)) + geom_point(color = 'cyan'), dfs)
-do.call('grid.arrange', list('grobs' = plots_speed_by_altdiffexp, 'ncol' = 2, top = "Speed2D by AltDiffExp"))
+fits <- Map(function (df) lm(Speed2D ~ AltDiffRatio + ADR2 + ADR3, data = df), dfs)
+fits <- Map(function (df) lm(Speed2D ~ AltDiffRatio + ADR2 + ADR3 + Distance2DTot, data = df), dfs)
 
-fits <- Map(function (df) lm(Speed2D ~ AltDiff + AltDiff2 + AltDiff3 + AltDiffExp, data = df), dfs)
 summaries <- Map(summary, fits)
 summaries
 
-for (df in dfs) print(ggpairs(df[c("AltDiff", "AltDiff2", "AltDiff3", "AltDiffExp", "Speed2D")]))
-
-plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiff, y = Speed2D, color = Distance2DTot)) + geom_point() +
-                                scale_colour_gradient(low = "orange", high = "blue"), dfs)
-do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff, 'ncol' = 2, top = "Speed2D by AltDiff"))
-
-predictions <- Map(function (fit) (predict(fit, interval = 'prediction')), fits)
-#predictions <- Map(function (fit) (predict(fit, interval = 'confidence')), fits)
-
-prediction_lists <- Map(function(df, prediction) cbind(AltDiff = df$AltDiff, Distance2DTot = df$Distance2DTot, Speed2D = df$Speed2D, prediction[ ,1:3]),
-  dfs, predictions)
-prediction_dfs <- Map(as.data.frame, prediction_lists)
-
-prediction_plots <- Map(function(prediction_df) ggplot(prediction_df, aes(x = Distance2DTot)) +
-               geom_point(aes(y = Speed2D, color = 'blue')) +
-               geom_ribbon(aes(ymin = lwr, ymax = upr), fill = 'cyan', alpha = 0.2) ,
-             prediction_dfs)
-
-do.call('grid.arrange', list('grobs' = prediction_plots, 'ncol' = 2, top = "Speed2D by AltDiff and Distance2D: Prediction Intervals"))
-#do.call('grid.arrange', list('grobs' = prediction_plots, 'ncol' = 2, top = "Speed2D by AltDiff and Distance2D: Confidence Intervals"))
 
 
+###########################################################################################
+#                                     all runners together                                #
+###########################################################################################
 
+fit <- lm(Speed2D ~ AltDiffRatio + ADR2 + ADR3 , data = df)
+#fit <- lm(Speed2D ~ AltDiffRatio + ADR2 + ADR3 + Distance2DTot, data = df)
+
+summary(fit)
+
+r <- read_csv('route.csv') 
+r
+r <- r %>% filter(RouteNumber == 1) %>% select(AltitudeDifference:Distance)
+r <- r %>% mutate(DistanceLag = Distance - lag(Distance))
+r
+r <- r %>% mutate(AltDiffRatio = AltitudeDifference/DistanceLag)
+r
+
+ggplot(df, aes(x = AltDiffRatio)) + geom_histogram()
+ggplot(r, aes(x = AltDiffRatio)) + geom_histogram()
+
+r <- r %>% mutate(ADR2 = AltDiffRatio^2, ADR3 = AltDiffRatio^3, Distance2DTot = Distance)
+r
+r <- r %>% select(AltDiffRatio: Distance2DTot)
+r
+
+pred <- predict(fit, newdata = r, interval = 'prediction')
+
+r <- r %>% cbind(pred = pred[,1], lower = pred[,2], upper=pred[,3])
+r
+
+ggplot(r, aes(Distance2DTot, pred)) + geom_line() + 
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = 'cyan', alpha = 0.2) +
+  coord_cartesian(ylim = c(0,20)) + geom_smooth()
 
 
 
@@ -191,6 +205,7 @@ route
 route <- route %>% filter(RouteNumber == 1) %>% select(Longitude:Distance)
 route
 
+ggplot(route, aes(Distance, Altitude)) + geom_line()
 
 ggplot(route, aes(Distance, Altitude)) + geom_line() + 
   geom_line(mapping = aes(x = Distance2DTot, y = Altitude), data = df69, color = 'blue') +
