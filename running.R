@@ -1,7 +1,7 @@
 library(readr)
 library(dplyr)
 library(ggplot2)
-library(GGally)
+library(ggfortify)
 library(gridExtra)
 library(dlm)
 library(lubridate)
@@ -13,18 +13,24 @@ df
 df <- df %>% filter(Timestamp > ymd_hms('2016-08-06 10:00:00'))
 df
 
-df <- df %>% select(Stnr, Timestamp, Duration, Longitude,  LastLongitude, Latitude, LastLatitude,  Altitude, LastAltitude, Distance2D, Distance2DTot, Speed2D) %>%
-  mutate(AltDiff = Altitude - LastAltitude)
-df <- df %>% mutate(AltDiffRatio = AltDiff/Distance2D)
-df <- df %>% mutate(ADR2 = AltDiffRatio^2, ADR3 = AltDiffRatio^3)
-
+df <- df %>% select(Stnr, Timestamp, Duration, Longitude,  LastLongitude, Latitude, LastLatitude,
+                    Altitude, LastAltitude, Distance2D, Distance2DTot, Speed2D) 
+df <- df %>% mutate(AltDiff = Altitude - LastAltitude)
 df <- df %>% mutate(Stnr = factor(Stnr))
-
-#df69$madist <- ma(df69$Distance2D, 6, centre = TRUE)
 
 # remove all altdiffs < -10 or > +20
 # see boxplots below
 df <- df %>% filter(between(AltDiff, -10, 20))
+
+mov <- function(x, n=5) {stats::filter(x,rep(1/n,n), sides=2)}
+df <- df %>% group_by(Stnr) %>% mutate(maAltDiff = as.vector(unclass(mov(AltDiff))),
+                                       maSpeed = as.vector(unclass(mov(Speed2D))))
+
+# using moving average of altdiff here!
+df <- df %>% mutate(AltDiffRatio = maAltDiff/Distance2D)
+df <- df %>% mutate(ADR2 = AltDiffRatio^2, ADR3 = AltDiffRatio^3)
+
+###
 
 df69 <- df %>% filter(Stnr == 69)
 df395 <- df %>% filter(Stnr == 395)
@@ -32,7 +38,11 @@ df428 <- df %>% filter(Stnr == 428)
 df529 <- df %>% filter(Stnr == 529)
 
 dfs <- list(df69, df395, df428, df529)
-dfs
+
+
+
+
+
 
 ###########################################################################################
 #                               Explore / Cleanup                                         #
@@ -73,9 +83,10 @@ df529strange <- df529 %>% filter(between(Timestamp, ymd_hms('2016-08-06 12:16:00
 #                               Kalman Filtering for lat/long/alt                         #
 ###########################################################################################
 
-#var <- ts(df$Latitude)
+#var <- ts(df529$Latitude)
 #var <- ts(df529$Longitude)
-var <- ts(df69$Altitude)
+#var <- ts(df529$Altitude)
+var <- ts(df529$Altitude)
 
 ####### local level (random walk plus noise)  - StructTS ######
 
@@ -101,6 +112,7 @@ buildModPoly1 <- function(v) {
   dlmModPoly(1, dV=dV, dW=dW, m0=m0)
 }
 
+# local linear trend
 buildModPoly2 <- function(v) {
   dV <- exp(v[1])
   dW <- exp(v[2:3])
@@ -112,19 +124,17 @@ varGuess <- var(diff(var), na.rm=TRUE)
 mu0Guess <- as.numeric(var[1])
 lambda0Guess <- 0.0
 
-parm <- c(log(varGuess), log(varGuess), log(varGuess))
-#parm <- c(log(varGuess), log(varGuess), log(varGuess),
-#          mu0Guess, lambda0Guess)
-mle <- dlmMLE(var, parm=parm, buildModPoly1)
-#mle <- dlmMLE(var, parm=parm, buildModPoly2)
+#parm <- c(log(varGuess), log(varGuess), log(varGuess))
+parm <- c(log(varGuess), log(varGuess), log(varGuess),
+          mu0Guess, lambda0Guess)
+#mle <- dlmMLE(var, parm=parm, buildModPoly1)
+mle <- dlmMLE(var, parm=parm, buildModPoly2)
 
 if (mle$convergence != 0) stop(mle$message)
 
-model <- buildModPoly1(mle$par)
-#model <- buildModPoly2(mle$par)
-cat("Observational variance:", model$V, "\n",
-    "Transitional variance:", model$W, "\n",
-    "Initial level:", model$m0, "\n")
+#model <- buildModPoly1(mle$par)
+model <- buildModPoly2(mle$par)
+model
 
 filtered <- dlmFilter(var, model)
 tsdiag(filtered)
@@ -139,21 +149,21 @@ plot(cbind(var, filtered$m[-1], smoothed$s[-1]), plot.type='s', col=c("black","r
 
 
 ###########################################################################################
-#                  Speed2D ~ AltDiffRatio + ADR2 + ADR3                                   #
+#                  maSpeed ~ AltDiffRatio + ADR2 + ADR3                                   #
 ###########################################################################################
 
 
-plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiffRatio, y = Speed2D)) + geom_point(color = 'green'), dfs)
-do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff, 'ncol' = 2, top = "Speed2D by AltDiff"))
+plots_speed_by_altdiff <- Map(function (df) ggplot(df, aes(x = AltDiffRatio, y = maSpeed)) + geom_point(color = 'green'), dfs)
+do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff, 'ncol' = 2, top = "maSpeed by AltDiff"))
 
-plots_speed_by_altdiff2 <- Map(function (df) ggplot(df, aes(x = ADR2, y = Speed2D)) + geom_point(color = 'blue'), dfs)
-do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff2, 'ncol' = 2, top = "Speed2D by AltDiff2"))
+plots_speed_by_altdiff2 <- Map(function (df) ggplot(df, aes(x = ADR2, y = maSpeed)) + geom_point(color = 'blue'), dfs)
+do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff2, 'ncol' = 2, top = "maSpeed by AltDiff2"))
 
-plots_speed_by_altdiff3 <- Map(function (df) ggplot(df, aes(x = ADR3, y = Speed2D)) + geom_point(color = 'red'), dfs)
-do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff3, 'ncol' = 2, top = "Speed2D by AltDiff3"))
+plots_speed_by_altdiff3 <- Map(function (df) ggplot(df, aes(x = ADR3, y = maSpeed)) + geom_point(color = 'red'), dfs)
+do.call('grid.arrange', list('grobs' = plots_speed_by_altdiff3, 'ncol' = 2, top = "maSpeed by AltDiff3"))
 
-fits <- Map(function (df) lm(Speed2D ~ AltDiffRatio + ADR2 + ADR3, data = df), dfs)
-fits <- Map(function (df) lm(Speed2D ~ AltDiffRatio + ADR2 + ADR3 + Distance2DTot, data = df), dfs)
+fits <- Map(function (df) lm(maSpeed ~ AltDiffRatio + ADR2 + ADR3, data = df), dfs)
+#fits <- Map(function (df) lm(maSpeed ~ AltDiffRatio + ADR2 + ADR3 + Distance2DTot, data = df), dfs)
 
 summaries <- Map(summary, fits)
 summaries
@@ -161,12 +171,12 @@ summaries
 
 
 ###########################################################################################
-#                                     all runners together                                #
+#                                     prediction                                          #
 ###########################################################################################
 
-fit <- lm(Speed2D ~ AltDiffRatio + ADR2 + ADR3 , data = df)
-#fit <- lm(Speed2D ~ AltDiffRatio + ADR2 + ADR3 + Distance2DTot, data = df)
+pred_df <- df529
 
+fit <- lm(maSpeed ~ AltDiffRatio + ADR2 + ADR3 , data = pred_df)
 summary(fit)
 
 r <- read_csv('route.csv') 
@@ -177,7 +187,7 @@ r
 r <- r %>% mutate(AltDiffRatio = AltitudeDifference/DistanceLag)
 r
 
-ggplot(df, aes(x = AltDiffRatio)) + geom_histogram()
+ggplot(pred_df, aes(x = AltDiffRatio)) + geom_histogram()
 ggplot(r, aes(x = AltDiffRatio)) + geom_histogram()
 
 r <- r %>% mutate(ADR2 = AltDiffRatio^2, ADR3 = AltDiffRatio^3, Distance2DTot = Distance)
@@ -195,6 +205,8 @@ ggplot(r, aes(Distance2DTot, pred)) + geom_line() +
   coord_cartesian(ylim = c(0,20)) + geom_smooth()
 
 
+# main problem are single out-of-range predictions that spoil it all
+filter(r, pred > 20 | pred < 0)
 
 #####################################################################################
 
