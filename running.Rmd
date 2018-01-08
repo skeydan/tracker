@@ -1,0 +1,196 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+library(readr)
+library(dplyr, warn.conflicts = FALSE)
+library(ggplot2,warn.conflicts = FALSE)
+library(gridExtra, warn.conflicts = FALSE)
+library(lubridate, warn.conflicts = FALSE)
+library(ggmap)
+library(tidyr)
+library(purrr)
+```
+
+
+First, let's read in the data. We have a dataset containing time, distance and altitude measurements for 5 different runners.
+
+
+```{r}
+df <- read_csv('tracker.csv')
+df
+```
+
+
+
+### Data cleansing, preprocessing and feature engineering
+
+Before we even start exploratory data analysis (or as a part of it), we need to check data quality and possibly remove problematic rows.
+
+For one, we should not use any measurements made before the start of the race:
+
+```{r}
+df <- df %>% filter(Timestamp > ymd_hms('2016-08-06 10:00:00'))
+df
+```
+
+
+Then,we should make sure we take into account only runners that made it through the whole distance.
+
+```{r}
+df %>% group_by(Stnr) %>% summarise(max(Distance2DTot))
+df <- df %>% filter(Stnr != 340)
+```
+
+
+We want to add the difference in altitude as a feature. At the same time, we remove all altitude differences that given the timespan between measurements, seem highly unlikely.
+
+```{r}
+df <- df %>% mutate(AltitudeDifference = Altitude - LastAltitude)
+
+g1 <- ggplot(df, aes(x = AltitudeDifference)) + geom_histogram(bins = 30) + theme(aspect.ratio = 1)
+g2 <- ggplot(df, aes(x = AltitudeDifference)) + geom_histogram(bins = 50) + coord_cartesian(xlim = c(-20,25)) + theme(aspect.ratio = 1)
+grid.arrange(grobs = list(g1, g2), ncol = 2)
+
+df <- df %>% filter(between(AltitudeDifference, -20, 22))
+```
+
+
+Instead of the difference in altitude per se, we are more interested in altitude difference relative to distance run.
+Again we use our "domain knowledge", setting negative differences to 0 as running downhill does not cause a speedup comparable to the slowdown to be expected from running downhill.
+
+```{r}
+df <- df %>% mutate(RelativeAltitudeDifference = AltitudeDifference/Distance2D)
+
+df <- df %>% mutate(RelativeAltitudeDifference = pmax(RelativeAltitudeDifference, 0))
+df
+```
+
+To counter noise in the individual measurements, we introduce moving averages of relative altitude difference, speed and distance. 
+
+```{r}
+window_size <- 61
+moving_average <- function(x, n = window_size) stats::filter(x, rep(1 / n, n), sides = 2)
+df <- df %>% group_by(Stnr) %>% mutate(
+  RelativeAltitudeDifference = as.vector(moving_average(RelativeAltitudeDifference)),
+  Speed2D = as.vector(moving_average(Speed2D))) 
+df <- na.omit(df)
+df
+```
+
+
+
+
+### Exploring the data
+
+```{r}
+by_stnr <- df %>% group_by(Stnr) %>% nest()
+by_stnr
+```
+
+```{r, fig.width=8, fig.height=8}
+plot_speed_by_distancetotal <- function(df, stnr) {
+  ggplot(df, aes(x = Distance2DTot, y = Altitude, color = Speed2D)) + geom_point()  + scale_colour_gradient(low = "orange", high = "blue") + theme(aspect.ratio = 1) + ggtitle(stnr)
+}
+plots <- map2(by_stnr$data, by_stnr$Stnr, plot_speed_by_distancetotal)
+grid.arrange(grobs = plots)
+```
+
+
+```{r, fig.width=8, fig.height=8}
+plot_speed_by_relaltdiff <- function(df, stnr) {
+  ggplot(df, aes(x = RelativeAltitudeDifference, y = Speed2D, color = Distance2DTot)) + geom_point()  + scale_colour_gradient(low = "orange", high = "blue") + theme(aspect.ratio = 1) + ggtitle(stnr)
+}
+plots <- map2(by_stnr$data, by_stnr$Stnr, plot_speed_by_relaltdiff)
+grid.arrange(grobs = plots)
+```
+
+### Run linear models
+
+First we try to predict speed directly by relative difference in altitude.
+
+```{r}
+run_lm <- function(df) lm(Speed2D ~ RelativeAltitudeDifference, data = df) %>% summary()
+models <- map(by_stnr$data, run_lm)
+names(models) <- paste0("Runner nr. ", by_stnr$Stnr)
+models
+```
+
+Will it get better if we add nonlinear components (like the square of the relative difference in altitude)?
+
+```{r}
+lm_summary <- function(df) lm(Speed2D ~ RelativeAltitudeDifference + I(RelativeAltitudeDifference ^ 2), data = df) %>% summary()
+models <- map(by_stnr$data, lm_summary)
+names(models) <- paste0("Runner nr. ", by_stnr$Stnr)
+models
+```
+```{r}
+plot_predictions_lm <- function(df, stnr) {
+  fit <- lm(Speed2D ~ RelativeAltitudeDifference + I(RelativeAltitudeDifference ^ 2), data = df)
+  preds <- predict(fit, interval = 'prediction')
+  df <- df %>% mutate(predicted_speed = preds[,1])
+  ggplot(df, aes(x = Distance2DTot)) + geom_line(aes(y = predicted_speed), color='violet') + geom_line(aes(y=Speed2D), color='cyan') +
+    ggtitle(paste0("Predicted vs. actual, runner ", stnr))
+}
+plots <- map2(by_stnr$data, by_stnr$Stnr, plot_predictions_lm)
+grid.arrange(grobs = plots)
+```
+
+
+Of course, we are not retricted to linear models. We could use a smoothing spline:
+
+```{r}
+plot_predictions_spline <- function(df, stnr) {
+  fit <- smooth.spline(df$RelativeAltitudeDifference, df$Speed2D, df = 5)
+  preds <- predict(fit, df$RelativeAltitudeDifference)
+  df <- df %>% mutate(predicted_speed = preds$y)
+  ggplot(df, aes(x = Distance2DTot)) + geom_line(aes(y=predicted_speed), color='violet') +
+    geom_line(aes(y = Speed2D), color='cyan') +
+    ggtitle(paste0("Predicted vs. actual, runner ", stnr))
+
+}
+plots <- map2(by_stnr$data, by_stnr$Stnr, plot_predictions_spline)
+grid.arrange(grobs = plots)
+```
+
+
+### Making predictions for the route
+
+In reality, we will want to make predictions for an official route description, not the distances reported by the tracker. Let's load the corresponding route and adapt the dataset to our purpose.
+
+```{r}
+r <- read_csv('route.csv') 
+r
+```
+
+```{r}
+r <- r %>% filter(RouteNumber == 1) 
+r <- r %>% mutate(DistanceLag = Distance - lag(Distance))
+r <- na.omit(r)
+```
+
+```{r}
+r <- r %>% mutate(RelativeAltitudeDifference = AltitudeDifference/DistanceLag)
+r <- r %>% mutate(RelativeAltitudeDifference = pmax(RelativeAltitudeDifference, 0))
+r
+```
+
+
+
+```{r}
+plot_predictions_lm_route <- function(df, stnr) {
+  fit <- smooth.spline(x = df$RelativeAltitudeDifference, y = df$Speed2D, df = 5) 
+  preds <- predict(fit, x = r$RelativeAltitudeDifference)
+  r <- r %>% mutate(predicted_speed = preds$y)
+  ggplot(r, aes(x = Distance)) + geom_line(aes(y=predicted_speed), color='violet') + 
+  geom_smooth(aes(y = predicted_speed)) + 
+  ggtitle("Expected speed on given route data (runner 529)")
+}
+plots <- map2(by_stnr$data, by_stnr$Stnr, plot_predictions_lm_route)
+grid.arrange(grobs = plots)
+```
+
